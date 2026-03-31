@@ -182,6 +182,8 @@ To use an example: `cp examples/config_saas.py config.py`
 langgraph-gtm-agent/
 ├── gtm_agent.py          # The entire agent (run this)
 ├── config.py              # Your business config (edit this)
+|── example/
+|   |── config_saas.py
 ├── credentials.json       # Google Sheets auth (not in repo)
 ├── .env                   # API keys (not in repo)
 ├── .gitignore
