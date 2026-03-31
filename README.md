@@ -253,7 +253,7 @@ Some ideas for what to build next:
 
 ## Built by
 
-[Atif Irshad](https://linkedin.com/in/atifirshad) — GTM operator and builder exploring AI-powered sales workflows.
+[Atif Irshad](https://linkedin.com/in/atifirshad21) — GTM operator and builder exploring AI-powered sales workflows.
 
 Built as a hands-on learning project after studying [LangChain's GTM Agent case study](https://blog.langchain.com/how-we-built-langchains-gtm-agent/).
 
