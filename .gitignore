@@ -1,0 +1,19 @@
+# Secrets
+.env
+credentials.json
+
+# Database (auto-generated at runtime)
+agent_memory.db
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
