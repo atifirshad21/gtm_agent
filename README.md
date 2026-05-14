@@ -1,89 +1,155 @@
+<div align="center">
+
 # LangGraph GTM Agent
 
-An open-source, AI-powered outbound sales agent built with LangChain, LangGraph, and Claude. It researches leads, drafts personalized emails, and learns from your edits over time.
+### AI-powered outbound sales — research, draft, learn, repeat.
 
-**Configure it for any business in under 5 minutes** by editing a single file (`config.py`).
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![LangGraph](https://img.shields.io/badge/LangGraph-Workflow-7C3AED?style=for-the-badge)](https://github.com/langchain-ai/langgraph)
+[![LangChain](https://img.shields.io/badge/LangChain-Agent-16A34A?style=for-the-badge)](https://langchain.com)
+[![Claude](https://img.shields.io/badge/Claude-Sonnet_4-D97706?style=for-the-badge)](https://anthropic.com)
 
-![Python](https://img.shields.io/badge/Python-3.11+-blue)
-![LangChain](https://img.shields.io/badge/LangChain-latest-green)
-![LangGraph](https://img.shields.io/badge/LangGraph-latest-purple)
-![Claude](https://img.shields.io/badge/LLM-Claude_Sonnet_4-orange)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+**Configure it for any business in under 5 minutes by editing a single file.**
 
----
+[View Demo](#usage) · [Report Bug](https://github.com/atifirshad21/langgraph-gtm-agent/issues) · [Request Feature](https://github.com/atifirshad21/langgraph-gtm-agent/issues)
 
-## What it does
-
-```
-Google Sheet     →    Research     →    Draft     →    You review     →    CRM updated
-(new lead)           (AI agent)       (Claude)      (Send/Edit/Cancel)   (auto)
-```
-
-Instead of spending 15 minutes per lead toggling between tabs, the agent does it in under 60 seconds:
-
-1. **Checks contact history** — prevents duplicate outreach automatically
-2. **Researches the company** — scrapes their website, searches for news, finds relevant signals
-3. **Drafts a personalized email** — different strategies for cold vs. warm leads
-4. **You review** — Send, Edit (with feedback), or Cancel. Nothing sends without your approval
-5. **Learns from your edits** — remembers your style preferences for future drafts
-6. **Updates your CRM** — marks leads as "contacted" in Google Sheets
-
-Inspired by [How LangChain built their GTM Agent](https://blog.langchain.com/how-we-built-langchains-gtm-agent/) which increased lead conversion by 250%.
+</div>
 
 ---
 
-## Quick start
+## About The Project
 
-### 1. Clone and install
+Most outbound sales workflows are a grind: open a tab, Google the company, check the CRM, think of an angle, write a draft, edit it, repeat. 15 minutes per lead, every lead.
+
+This agent collapses that to under 60 seconds.
+
+It reads new leads from Google Sheets, dispatches an AI research subagent to scrape websites and scan for news, drafts a personalized email, and waits for your approval — all from a single terminal command. When you edit a draft, it learns your writing style and applies it automatically to every future email.
+
+> Inspired by [How LangChain built their GTM Agent](https://blog.langchain.com/how-we-built-langchains-gtm-agent/), which increased lead conversion by 250%.
+
+---
+
+## How It Works
+
+```
+Google Sheet  →  Dedup check  →  Research subagent  →  Draft  →  You review  →  CRM updated
+ (new lead)       (auto)        (web + scrape + CRM)   (Claude)  (Send/Edit/Cancel)   (auto)
+```
+
+1. **Dedup check** — Skips leads already marked `contacted`. No accidental double-outreach.
+2. **Research subagent** — A mini ReAct agent with three tools: website scraper, web search, CRM lookup. It adapts — if the website is down, it does more web searches. If it finds a funding round, it digs deeper.
+3. **Email draft** — Claude writes a personalized email using research signals, relationship context (cold vs. warm), and your stored style preferences.
+4. **Human review** — You see the draft, the agent's reasoning, and the signals that shaped it. Nothing sends without your explicit `[S]end`.
+5. **Style learning** — When you edit and approve a revision, the agent diffs original vs. final and stores your preferences in SQLite. All future drafts apply them automatically.
+6. **CRM update** — On send, the lead is marked `contacted` in Google Sheets.
+
+---
+
+## Built With
+
+| Layer | Technology |
+|-------|-----------|
+| Workflow orchestration | [LangGraph](https://github.com/langchain-ai/langgraph) — StateGraph with conditional edges |
+| Research agent | [LangChain](https://langchain.com) — ReAct agent with tool use |
+| LLM | [Claude Sonnet 4](https://anthropic.com) — drafting, learning, compaction |
+| CRM | [Google Sheets](https://developers.google.com/sheets) via `gspread` |
+| Web search | [Tavily API](https://tavily.com) — 1,000 free searches/month |
+| Web scraping | [BeautifulSoup4](https://pypi.org/project/beautifulsoup4/) |
+| Memory | SQLite — style preferences + draft history |
+| Terminal UI | [Rich](https://github.com/Textualize/rich) |
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.11+
+- An [Anthropic API key](https://console.anthropic.com)
+- A [Tavily API key](https://tavily.com) (free tier: 1,000 searches/month)
+- A Google Cloud project with Sheets + Drive APIs enabled and a service account JSON downloaded
+
+### Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/langgraph-gtm-agent.git
+git clone https://github.com/atifirshad21/langgraph-gtm-agent.git
 cd langgraph-gtm-agent
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Add your API keys
+### 1. Add your API keys
 
 ```bash
 cp .env.example .env
-# Edit .env with your keys
 ```
 
-You need:
-- **Anthropic API key** → [console.anthropic.com](https://console.anthropic.com)
-- **Tavily API key** → [tavily.com](https://tavily.com) (free: 1000 searches/month)
-- **Google Sheets service account** → [console.cloud.google.com](https://console.cloud.google.com) (enable Sheets + Drive APIs)
+```env
+ANTHROPIC_API_KEY=sk-ant-...
+TAVILY_API_KEY=tvly-...
+```
 
-### 3. Set up your Google Sheet
+Place your Google service account JSON at the root as `credentials.json`.
 
-Create a sheet with these columns:
+### 2. Set up your Google Sheet
+
+Create a sheet with these columns and share it with your service account email:
 
 | Lead ID | Company | Company URL | Contact Name | Title | Email | Status |
-|---------|---------|-------------|-------------|-------|-------|--------|
+|---------|---------|-------------|--------------|-------|-------|--------|
 | 1 | Acme Corp | https://acme.com | Jane Smith | VP Sales | jane@acme.com | new |
 
-Share the sheet with your service account email.
+Set `Status` to `new` for any lead you want the agent to process.
 
-### 4. Configure for your business
+### 3. Configure for your business
 
-Edit `config.py` — this is the only file you need to customize:
+Edit `config.py` — the only file you need to customize:
 
 ```python
 COMPANY_NAME = "Your Company"
 COMPANY_DESCRIPTION = "We help [customers] solve [problem] by [solution]."
-TARGET_PERSONAS = "VP of Sales, Head of Ops, CTO"
-PAIN_POINTS = "- Problem 1\n- Problem 2"
+TARGET_PERSONAS  = "VP of Sales, Head of Ops, CTO"
+PAIN_POINTS      = "- Problem 1\n- Problem 2"
+GOOGLE_SHEET_NAME = "Your Sheet Name"
 ```
 
-See `examples/` for complete configs for SaaS, fashion, and recruiting.
+See [`example/config_saas.py`](example/config_saas.py) for a complete, ready-to-use configuration.
 
-### 5. Run
+---
+
+## Usage
 
 ```bash
 python gtm_agent.py
 ```
+
+The agent loads new leads from your sheet, runs research, and presents each draft for review:
+
+```
+═══ Acme Corp GTM Agent ═══
+Found 3 new leads
+
+┌──────────────────────────────────────────────────┐
+│  To: Jane Smith (VP Sales) @ Acme Corp           │
+│  Type: cold | Attempt: #1                        │
+└──────────────────────────────────────────────────┘
+
+Subject: Saw your API launch
+
+Hi Jane — noticed Acme just shipped a new API layer.
+[...]
+
+🧠 Reasoning: Cold outreach, opportunity-first framing...
+📊 Signals: api launch, series-b
+
+Action:  [S]end  |  [E]dit  |  [C]ancel
+```
+
+**Commands:**
+- `all` — process every new lead in sequence
+- `1`, `2`, `3` — process a specific lead by number
+- `compact` — consolidate redundant style preferences when memory grows stale
 
 ---
 
@@ -91,133 +157,120 @@ python gtm_agent.py
 
 ```
 ┌─────────────────────┐
-│  Google Sheet (CRM) |
-│  New lead detected  |
+│  Google Sheet (CRM) │
+│  New lead detected  │
 └─────────┬───────────┘
           │
           ▼
 ┌─────────────────────┐
-│  Should we contact? |──── NO ───▶ Skip & log
-│  (history check)    |
+│  Should we contact? │──── NO ───▶ Skip & log
+│  (dedup check)      │
 └─────────┬───────────┘
           │ YES
           ▼
 ┌─────────────────────────────────────────┐
-│         Research Subagent               |
-│  ┌──────────┐ ┌────────┐ ┌───────────┐  |
-│  │ Website  │ │ Web    │ │ CRM       │  |
-│  │ scraper  │ │ search │ │ lookup    │  |
-│  └──────────┘ └────────┘ └───────────┘  |
+│         Research Subagent               │
+│  ┌──────────┐ ┌────────┐ ┌───────────┐  │
+│  │ Website  │ │  Web   │ │    CRM    │  │
+│  │ scraper  │ │ search │ │  lookup   │  │
+│  └──────────┘ └────────┘ └───────────┘  │
 │  AI decides which tools to use          │
 │  and adapts if something fails          │
 └─────────────────┬───────────────────────┘
                   │
                   ▼
-┌─────────────────────--|
-│  Classify relationship│
-│  cold / warm          │
-└─────────┬───────────--|
+┌──────────────────────┐
+│  Classify lead type  │
+│  cold / warm         │
+└─────────┬────────────┘
           │
           ▼
 ┌─────────────────────┐
-│  Draft email        |◀──── Style preferences
-│  (Claude + memory)  |      from past edits
+│  Draft email        │◀──── Stored style preferences
+│  (Claude + memory)  │      from your past edits
 └─────────┬───────────┘
           │
           ▼
-┌─────────────────────---|
-│  Human review          |
-│  [S]end [E]dit [C]ancel│
-└──┬──────┬──────┬────---|
-   │      │      │
-   ▼      │      ▼
- Update   │    Log &
- CRM      │    skip
-          │
-          ▼
-      Redraft with
-      feedback ──▶ Review again
+┌──────────────────────────┐
+│  Human review            │
+│  [S]end [E]dit [C]ancel  │
+└──┬───────┬───────┬───────┘
+   │       │       │
+   ▼       │       ▼
+Update     │     Log &
+ CRM       │     skip
+           │
+           ▼
+       Redraft with
+       feedback ──▶ Review again
 ```
 
-### Key patterns
+### Key design patterns
 
-**Subagent pattern** — The research step uses a mini AI agent with constrained tools. Unlike a fixed script, it adapts: if a website is down, it does extra web searches. If it finds a funding round, it digs deeper. But it can only research — it can't draft emails or update the CRM.
+**Subagent pattern** — Research is handled by a constrained ReAct agent with only three tools. It cannot draft emails or update the CRM — only gather intelligence. This keeps the research step adaptive without giving it too much surface area.
 
-**Memory system** — When you edit a draft and approve the revision, the agent compares the original against the final, extracts your style preferences, and stores them in SQLite. Future drafts automatically apply your preferences.
+**Memory system** — When you approve an edited draft, Claude diffs the original against the final, extracts your implied style preferences, and stores them in SQLite. Future drafts apply these automatically — you shouldn't have to ask for the same change twice.
 
-**Human-in-the-loop** — Nothing sends without your explicit approval. Every draft shows the agent's reasoning and the research signals that informed it.
+**Human-in-the-loop** — Every draft surfaces the agent's reasoning and the research signals that shaped it. Nothing sends without explicit approval.
 
 ---
 
-## Configuration reference
+## Configuration Reference
 
-Everything is in `config.py`:
+All settings live in `config.py`:
 
 | Setting | What it does |
 |---------|-------------|
-| `COMPANY_NAME` | Your company name (shown in terminal and used in prompts) |
-| `COMPANY_DESCRIPTION` | 2-3 sentences about what you do (injected into email drafting) |
-| `TARGET_PERSONAS` | Job titles you're targeting (helps the agent match tone) |
-| `PAIN_POINTS` | Problems you solve (gives the agent outreach angles) |
-| `EMAIL_STYLE_GUIDE` | Rules for how emails should be written |
-| `WEBSITE_SIGNAL_KEYWORDS` | What to look for when scraping websites |
-| `RESEARCH_SIGNAL_KEYWORDS` | What to flag from web search results |
-| `GOOGLE_SHEET_NAME` | Name of your Google Sheet |
+| `COMPANY_NAME` | Used in terminal output and injected into prompts |
+| `COMPANY_DESCRIPTION` | 2-3 sentences about what you do — the core of the draft prompt |
+| `TARGET_PERSONAS` | Job titles you target; helps the agent calibrate tone |
+| `PAIN_POINTS` | Problems you solve; gives the agent outreach angles |
+| `EMAIL_STYLE_GUIDE` | Hard rules for how emails should be written |
+| `WEBSITE_SIGNAL_KEYWORDS` | What to look for when scraping company websites |
+| `RESEARCH_SIGNAL_KEYWORDS` | What to flag from web search results as signals |
+| `GOOGLE_SHEET_NAME` | Name of the Google Sheet to read leads from |
 
-### Example configs
-
-| Industry | File | What it targets |
-|----------|------|----------------|
-| SaaS | `examples/config_saas.py` | Product analytics for SaaS companies |
-| Fashion | `examples/config_fashion.py` | Recommerce for fashion brands |
-| Recruiting | `examples/config_recruiting.py` | AI recruiting for scaling startups |
-
-To use an example: `cp examples/config_saas.py config.py`
+**Using an example config:**
+```bash
+cp example/config_saas.py config.py
+```
 
 ---
 
-## Project structure
+## Project Structure
 
 ```
 langgraph-gtm-agent/
-├── gtm_agent.py          # The entire agent (run this)
-├── config.py              # Your business config (edit this)
-|── example/
-|   |── config_saas.py
-├── credentials.json       # Google Sheets auth (not in repo)
+├── gtm_agent.py          # The entire agent — run this
+├── config.py             # Your business config — edit this
+├── example/
+│   └── config_saas.py    # Ready-to-use SaaS example
+├── credentials.json       # Google service account (not in repo)
 ├── .env                   # API keys (not in repo)
-├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## How the memory works
+## How Memory Works
 
 ```
-Draft v1                     You edit                    Draft v2
-"Hi Jane, I noticed          "Make it shorter            "Hi Jane, saw your
-your team is growing         and more casual"            new API launch..."
-rapidly..."                        │
-                                   ▼
-                          Agent compares v1 vs v2
-                                   │
-                                   ▼
-                          Extracts preferences:
-                          • "Prefers casual tone"
-                          • "Shorter emails (~50 words)"
-                                   │
-                                   ▼
-                          Stored in SQLite ──▶ Applied to ALL future drafts
+You send an edited draft         Agent compares v1 vs. v2        Stored in SQLite
+                                                                        │
+Draft v1: "Hi Jane,              Claude extracts:                       ▼
+ your team is growing..."  ───▶  • "Prefers casual tone"    Applied to ALL future drafts
+                                 • "Shorter, under 50 words"
+Draft v2: "Hi Jane,
+ saw your new API launch..."
 ```
 
-View your stored preferences:
+View stored preferences:
 ```bash
 sqlite3 agent_memory.db "SELECT * FROM style_preferences;"
 ```
 
-Compact redundant preferences:
+Compact redundant preferences when they accumulate:
 ```
 Lead # to process: compact
 Compacted 12 preferences → 6
@@ -225,42 +278,22 @@ Compacted 12 preferences → 6
 
 ---
 
-## Tech stack
-
-| Component | Technology |
-|-----------|-----------|
-| Workflow engine | LangGraph (StateGraph with conditional edges) |
-| Agent framework | LangChain (ReAct agent with tools) |
-| LLM | Claude Sonnet 4 (Anthropic API) |
-| CRM | Google Sheets (gspread) |
-| Web research | Tavily API |
-| Web scraping | BeautifulSoup4 |
-| Memory | SQLite |
-| Terminal UI | Rich |
-
----
-
-## Extending
-
-Some ideas for what to build next:
+## Ideas for What to Build Next
 
 - **Slack delivery** — Send drafts to Slack instead of terminal using the Slack SDK
-- **Follow-up sequences** — Queue 2-3 follow-up emails after the first one
+- **Follow-up sequences** — Queue 2-3 follow-up emails automatically after the first
 - **Lead scoring** — Score leads based on research signals before drafting
-- **Multi-rep support** — Separate memory per rep name (already supported in the DB schema)
-- **Streamlit dashboard** — Build a web UI instead of terminal
-- **LangSmith tracing** — Add observability to track agent performance
+- **Multi-rep support** — Separate memory per rep (the DB schema already supports this)
+- **Streamlit dashboard** — Web UI instead of terminal
+- **LangSmith tracing** — Add observability to track agent decisions over time
 
 ---
 
-## Built by
+## Author
 
-[Atif Irshad](https://linkedin.com/in/atifirshad21) — GTM operator and builder exploring AI-powered sales workflows.
+**Atif Irshad** — GTM operator and builder exploring AI-powered sales workflows.
 
 Built as a hands-on learning project after studying [LangChain's GTM Agent case study](https://blog.langchain.com/how-we-built-langchains-gtm-agent/).
 
----
-
-## License
-
-MIT — use it, modify it, ship it.
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-0A66C2?style=flat&logo=linkedin)](https://linkedin.com/in/atifirshad21)
+[![GitHub](https://img.shields.io/badge/GitHub-Follow-181717?style=flat&logo=github)](https://github.com/atifirshad21)
