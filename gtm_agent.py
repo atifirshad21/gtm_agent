@@ -14,6 +14,7 @@ import os
 import json
 import sqlite3
 from typing import TypedDict
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import gspread
 import requests
@@ -47,7 +48,14 @@ from config import (
     RESEARCH_SIGNAL_KEYWORDS,
     WEBSITE_SIGNAL_KEYWORDS,
     GOOGLE_SHEET_NAME,
+    LEAD_SCORE_THRESHOLD,
+    LANGSMITH_PROJECT,
 )
+
+# LangSmith: wire project name from config; tracing activates automatically
+# when LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY are set in .env
+if os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true":
+    os.environ.setdefault("LANGCHAIN_PROJECT", LANGSMITH_PROJECT)
 
 
 # ═══════════════════════════════════════════
@@ -61,6 +69,127 @@ gc = gspread.authorize(creds)
 sheet = gc.open(GOOGLE_SHEET_NAME).sheet1
 
 llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0.3)
+
+
+# ═══════════════════════════════════════════
+# LEAD SCORING — Rubric-based signal detection
+# ═══════════════════════════════════════════
+
+class LeadSignals(BaseModel):
+    funding_detected: bool = Field(description="Recent funding round, Series A/B/C/D, raised capital, investment announced")
+    funding_evidence: str = Field(default="", description="One-line evidence, empty if not detected")
+    hiring_detected: bool = Field(description="Job postings, team expansion, scaling headcount, hiring spree")
+    hiring_evidence: str = Field(default="", description="One-line evidence, empty if not detected")
+    product_launch_detected: bool = Field(description="New product, major feature launch, expansion to new market, rebrand")
+    product_launch_evidence: str = Field(default="", description="One-line evidence, empty if not detected")
+    tech_alignment_detected: bool = Field(description="Technology or use-case signals that suggest a fit with our offering")
+    tech_alignment_evidence: str = Field(default="", description="One-line evidence, empty if not detected")
+    engagement_detected: bool = Field(description="Recent blog posts, conference appearances, webinars, public thought leadership")
+    engagement_evidence: str = Field(default="", description="One-line evidence, empty if not detected")
+    negative_detected: bool = Field(description="Layoffs, hiring freeze, budget cuts, pivoting away, company struggling or shutting down")
+    negative_evidence: str = Field(default="", description="One-line evidence, empty if not detected")
+
+
+# Fixed point values — score is deterministic once signals are mapped
+_SIGNAL_POINTS = {
+    "funding":         25,
+    "hiring":          20,
+    "product_launch":  15,
+    "tech_alignment":  15,
+    "engagement":      10,
+    "negative":       -25,
+}
+_BASE_SCORE = 15  # every lead starts here
+
+
+def _calculate_score(signals: LeadSignals) -> tuple[int, dict]:
+    score = _BASE_SCORE
+    breakdown = {}
+
+    checks = [
+        ("funding",        signals.funding_detected,        signals.funding_evidence,        "+25"),
+        ("hiring",         signals.hiring_detected,         signals.hiring_evidence,         "+20"),
+        ("product_launch", signals.product_launch_detected, signals.product_launch_evidence, "+15"),
+        ("tech_alignment", signals.tech_alignment_detected, signals.tech_alignment_evidence, "+15"),
+        ("engagement",     signals.engagement_detected,     signals.engagement_evidence,     "+10"),
+        ("negative",       signals.negative_detected,       signals.negative_evidence,       "-25"),
+    ]
+
+    labels = {
+        "funding":         "Funding signals",
+        "hiring":          "Hiring / growth",
+        "product_launch":  "Product launch",
+        "tech_alignment":  "Tech alignment",
+        "engagement":      "Engagement",
+        "negative":        "Negative signals",
+    }
+
+    for key, detected, evidence, pts in checks:
+        if detected:
+            score += _SIGNAL_POINTS[key]
+            label = labels[key]
+            breakdown[label] = f"{pts} pts — {evidence}" if evidence else f"{pts} pts"
+
+    return max(0, min(100, score)), breakdown
+
+
+scoring_llm = ChatAnthropic(
+    model="claude-sonnet-4-20250514", temperature=0
+).with_structured_output(LeadSignals)
+
+
+# ═══════════════════════════════════════════
+# DRAFT QUALITY EVALUATION
+# ═══════════════════════════════════════════
+
+class DraftQuality(BaseModel):
+    personalization_score: int = Field(ge=1, le=5, description="1-5: how specific is the email to this company/person? 5=very specific, 1=generic template")
+    personalization_feedback: str = Field(description="What's missing or what's good")
+    relevance_score: int = Field(ge=1, le=5, description="1-5: how well does the angle match what we know about their needs?")
+    relevance_feedback: str = Field(description="Brief feedback on the angle chosen")
+    cta_score: int = Field(ge=1, le=5, description="1-5: how soft and low-pressure is the call to action? 5=curious/conversational, 1=pushy/aggressive")
+    cta_feedback: str = Field(description="Brief feedback on the CTA")
+    passes_quality: bool = Field(description="True only if all three scores are 3 or above and no major issues exist")
+    rewrite_instructions: str = Field(default="", description="Specific, actionable fix instructions if passes_quality is False. Empty if passing.")
+
+
+_QUALITY_THRESHOLD = 3       # minimum score per dimension to pass
+_MAX_AUTO_REDRAFTS = 2       # max automatic redraft cycles before handing off to human regardless
+
+_GENERIC_PHRASES = [
+    "i hope this finds you well",
+    "i hope you're doing well",
+    "i wanted to reach out",
+    "touching base",
+    "circle back",
+    "synergy",
+    "leverage",
+    "game-changer",
+    "revolutionary",
+    "best-in-class",
+    "quick win",
+    "low-hanging fruit",
+]
+
+
+def _rule_checks(subject: str, body: str) -> list[str]:
+    """Fast, free checks before spending an LLM call on quality eval."""
+    issues = []
+    word_count = len(body.split())
+    if word_count > 100:
+        issues.append(f"Body is {word_count} words — must be under 100. Cut aggressively.")
+    if len(subject.split()) > 8:
+        issues.append(f"Subject is {len(subject.split())} words — keep it under 8 words.")
+    body_lower = body.lower()
+    for phrase in _GENERIC_PHRASES:
+        if phrase in body_lower:
+            issues.append(f"Contains generic phrase '{phrase}' — replace with something specific to the research.")
+    return issues
+
+
+eval_llm = ChatAnthropic(
+    model="claude-sonnet-4-20250514", temperature=0
+).with_structured_output(DraftQuality)
 
 
 # ═══════════════════════════════════════════
@@ -307,10 +436,15 @@ class GTMState(TypedDict):
     website_data: str
     web_search_results: str
     signals: list
+    lead_score: int
+    score_breakdown: dict
     relationship_type: str
     draft_email: str
     draft_subject: str
     reasoning: str
+    eval_passed: bool
+    eval_feedback: str
+    auto_redraft_count: int
     human_decision: str
     edit_instructions: str
     attempt_number: int
@@ -383,6 +517,139 @@ def research_company(state: GTMState) -> dict:
     }
 
 
+def score_lead(state: GTMState) -> dict:
+    """Score the lead 0-100 using a fixed rubric applied to research findings."""
+    lead = state["lead"]
+    research = state.get("website_data", "")
+
+    console.print(f"\n[bold cyan]📊 Scoring lead: {lead['Contact Name']} @ {lead['Company']}...[/bold cyan]")
+
+    prompt = f"""Analyze the research below about {lead['Company']} and detect which signals are present.
+
+Company description of who we are selling for context on tech alignment:
+{COMPANY_DESCRIPTION}
+
+Research summary:
+{research[:2000]}
+
+Be strict — only mark a signal as detected if there is clear evidence in the research text.
+Do not infer or assume. If the research is thin, most signals should be False."""
+
+    signals: LeadSignals = scoring_llm.invoke(prompt)
+    score, breakdown = _calculate_score(signals)
+
+    # Color-coded label for terminal output
+    if score >= 75:
+        score_display = f"[bold green]{score}/100 — Hot lead[/bold green]"
+    elif score >= 50:
+        score_display = f"[bold yellow]{score}/100 — Warm lead[/bold yellow]"
+    elif score >= 25:
+        score_display = f"[dim]{score}/100 — Cold lead[/dim]"
+    else:
+        score_display = f"[bold red]{score}/100 — Weak lead[/bold red]"
+
+    console.print(f"   Lead score: {score_display}")
+    for label, detail in breakdown.items():
+        console.print(f"   [dim]→ {label}: {detail}[/dim]")
+    if not breakdown:
+        console.print("   [dim]→ No signals detected (base score only)[/dim]")
+
+    result: dict = {"lead_score": score, "score_breakdown": breakdown}
+
+    # Auto-skip if below configured threshold (0 = informational only)
+    if LEAD_SCORE_THRESHOLD > 0 and score < LEAD_SCORE_THRESHOLD:
+        result["should_contact"] = False
+        result["skip_reason"] = (
+            f"Lead score {score}/100 is below threshold of {LEAD_SCORE_THRESHOLD}. "
+            f"Signals found: {', '.join(breakdown.keys()) or 'none'}."
+        )
+
+    return result
+
+
+def evaluate_draft(state: GTMState) -> dict:
+    """Quality gate: rule-based checks then LLM scoring. Auto-redrafts up to _MAX_AUTO_REDRAFTS times."""
+    subject = state.get("draft_subject", "")
+    body = state.get("draft_email", "")
+    research = state.get("website_data", "")
+    lead = state["lead"]
+    auto_count = state.get("auto_redraft_count", 0)
+
+    console.print(f"\n[bold cyan]🔍 Evaluating draft quality (attempt {auto_count + 1}/{_MAX_AUTO_REDRAFTS + 1})...[/bold cyan]")
+
+    # ── Step 1: Rule-based checks (free, instant) ──
+    rule_issues = _rule_checks(subject, body)
+    if rule_issues:
+        feedback = "RULE VIOLATIONS — fix before rewriting:\n" + "\n".join(f"• {i}" for i in rule_issues)
+        console.print(f"[yellow]   ✗ Rule checks failed[/yellow]")
+        for issue in rule_issues:
+            console.print(f"   [dim]  → {issue}[/dim]")
+        return {"eval_passed": False, "eval_feedback": feedback, "auto_redraft_count": auto_count + 1}
+
+    # ── Step 2: LLM quality check (structured output) ──
+    quality: DraftQuality = eval_llm.invoke(
+        f"""Evaluate this outreach email draft for {lead['Contact Name']} ({lead['Title']}) at {lead['Company']}.
+
+Research context used to write it:
+{research[:1000]}
+
+Subject: {subject}
+
+Body:
+{body}
+
+Score each dimension 1-5. Be strict: a 4+ means genuinely impressive, not just acceptable.
+Only set passes_quality=True if ALL three scores are {_QUALITY_THRESHOLD} or above."""
+    )
+
+    scores = {
+        "Personalization": quality.personalization_score,
+        "Relevance":       quality.relevance_score,
+        "CTA softness":    quality.cta_score,
+    }
+    avg = sum(scores.values()) / len(scores)
+    score_line = "  ".join(f"{k}: {v}/5" for k, v in scores.items()) + f"  → avg {avg:.1f}"
+
+    passes = quality.passes_quality and all(v >= _QUALITY_THRESHOLD for v in scores.values())
+
+    if passes:
+        console.print(f"[green]   ✓ Quality check passed[/green] — {score_line}")
+        return {"eval_passed": True, "eval_feedback": "", "auto_redraft_count": auto_count}
+
+    # Build targeted feedback for the redraft
+    feedback_lines = []
+    dim_feedback = [
+        ("Personalization", quality.personalization_score, quality.personalization_feedback),
+        ("Relevance",       quality.relevance_score,       quality.relevance_feedback),
+        ("CTA softness",    quality.cta_score,             quality.cta_feedback),
+    ]
+    for dim, score, fb in dim_feedback:
+        if score < _QUALITY_THRESHOLD:
+            feedback_lines.append(f"• {dim} ({score}/5): {fb}")
+    if quality.rewrite_instructions:
+        feedback_lines.append(f"• Overall: {quality.rewrite_instructions}")
+
+    feedback = "\n".join(feedback_lines)
+    console.print(f"[yellow]   ✗ Quality check failed[/yellow] — {score_line}")
+    for line in feedback_lines:
+        console.print(f"   [dim]  {line}[/dim]")
+
+    return {"eval_passed": False, "eval_feedback": feedback, "auto_redraft_count": auto_count + 1}
+
+
+def route_after_eval(state: GTMState) -> str:
+    if state.get("eval_passed", True):
+        return "human_review"
+    # Out of auto-redraft budget — pass to human with a warning
+    if state.get("auto_redraft_count", 0) > _MAX_AUTO_REDRAFTS:
+        console.print(
+            f"[bold yellow]⚠️  Quality check still failing after {_MAX_AUTO_REDRAFTS} "
+            f"auto-redrafts — handing off to you.[/bold yellow]"
+        )
+        return "human_review"
+    return "draft"
+
+
 def classify_relationship(state: GTMState) -> dict:
     """Classify: cold or contacted_other_person."""
     lead = state["lead"]
@@ -426,6 +693,16 @@ def draft_email(state: GTMState) -> dict:
     if attempt > 1 and edit_instructions:
         edit_note = f"\n\nREVISION #{attempt}. Rep feedback: {edit_instructions}"
 
+    # Auto-redraft feedback from the quality evaluation node
+    eval_note = ""
+    auto_redraft_count = state.get("auto_redraft_count", 0)
+    eval_feedback = state.get("eval_feedback", "")
+    if auto_redraft_count > 0 and eval_feedback:
+        eval_note = (
+            f"\n\nAUTO-QUALITY-CHECK FAILED (redraft #{auto_redraft_count}). "
+            f"Fix ALL of these issues before anything else:\n{eval_feedback}"
+        )
+
     prompt = f"""Write a personalized outreach email.
 
 ABOUT US:
@@ -453,6 +730,7 @@ SIGNALS DETECTED: {', '.join(state.get('signals', [])) or 'None found'}
 
 {style_prefs}
 {edit_note}
+{eval_note}
 
 FORMAT:
 SUBJECT: [subject line]
@@ -502,15 +780,32 @@ def human_review(state: GTMState) -> dict:
     """Show draft to human, get decision, learn from edits."""
     lead = state["lead"]
 
+    score = state.get("lead_score", 0)
+    if score >= 75:
+        score_str = f"[bold green]{score}/100[/bold green]"
+    elif score >= 50:
+        score_str = f"[bold yellow]{score}/100[/bold yellow]"
+    elif score >= 25:
+        score_str = f"[dim]{score}/100[/dim]"
+    else:
+        score_str = f"[bold red]{score}/100[/bold red]"
+
     console.print("\n")
     console.print(Panel(
         f"[bold]To:[/bold] {lead['Contact Name']} ({lead['Title']}) @ {lead['Company']}\n"
         f"[bold]Email:[/bold] {lead['Email']}\n"
         f"[bold]Type:[/bold] {state['relationship_type']} | "
-        f"[bold]Attempt:[/bold] #{state.get('attempt_number', 1)}",
+        f"[bold]Attempt:[/bold] #{state.get('attempt_number', 1)} | "
+        f"[bold]Score:[/bold] {score_str}",
         title="📧 DRAFT EMAIL",
         border_style="cyan"
     ))
+
+    if not state.get("eval_passed", True) and state.get("auto_redraft_count", 0) > _MAX_AUTO_REDRAFTS:
+        console.print(
+            f"[bold red]⚠️  Quality check did not pass after {_MAX_AUTO_REDRAFTS} auto-redrafts. "
+            f"Review carefully.[/bold red]\n"
+        )
 
     console.print(f"\n[bold]Subject:[/bold] {state['draft_subject']}\n")
     console.print(state["draft_email"])
@@ -518,9 +813,14 @@ def human_review(state: GTMState) -> dict:
     if state.get("reasoning"):
         console.print(Panel(state["reasoning"], title="🧠 Reasoning", border_style="yellow"))
 
+    breakdown = state.get("score_breakdown", {})
+    if breakdown:
+        breakdown_lines = "  ".join([f"{k} ({v.split(' — ')[0]})" for k, v in breakdown.items()])
+        console.print(f"[green]📊 Score breakdown:[/green] {breakdown_lines}\n")
+
     signals = state.get("signals", [])
     if signals:
-        console.print(f"[green]📊 Signals:[/green] {', '.join(signals)}\n")
+        console.print(f"[green]🔍 Research signals:[/green] {', '.join(signals)}\n")
 
     conn = init_db()
     pref_count = conn.execute(
@@ -615,8 +915,10 @@ graph = StateGraph(GTMState)
 
 graph.add_node("check_should_contact", check_should_contact)
 graph.add_node("research", research_company)
+graph.add_node("score_lead", score_lead)
 graph.add_node("classify", classify_relationship)
 graph.add_node("draft", draft_email)
+graph.add_node("evaluate_draft", evaluate_draft)
 graph.add_node("human_review", human_review)
 graph.add_node("update_crm", update_crm)
 graph.add_node("log_skip", log_skip)
@@ -629,9 +931,19 @@ graph.add_conditional_edges(
     lambda s: "research" if s["should_contact"] else "log_skip",
 )
 
-graph.add_edge("research", "classify")
+graph.add_edge("research", "score_lead")
+
+# After scoring: skip if below threshold, otherwise continue
+graph.add_conditional_edges(
+    "score_lead",
+    lambda s: "log_skip" if not s.get("should_contact", True) else "classify",
+)
+
 graph.add_edge("classify", "draft")
-graph.add_edge("draft", "human_review")
+graph.add_edge("draft", "evaluate_draft")
+
+# After eval: pass → human_review | fail + budget remaining → draft | fail + budget exhausted → human_review
+graph.add_conditional_edges("evaluate_draft", route_after_eval)
 
 graph.add_conditional_edges(
     "human_review",
@@ -654,6 +966,8 @@ if __name__ == "__main__":
     new_leads = [l for l in all_leads if str(l["Status"]).lower() == "new"]
 
     console.print(f"\n[bold cyan]═══ {COMPANY_NAME} GTM Agent ═══[/bold cyan]")
+    if os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true":
+        console.print(f"[dim]📡 LangSmith tracing active → project: {LANGSMITH_PROJECT}[/dim]")
     console.print(f"[bold]Found {len(new_leads)} new leads[/bold]\n")
 
     conn = init_db()
@@ -683,15 +997,20 @@ if __name__ == "__main__":
         return {
             "lead": lead,
             "all_company_contacts": [],
-            "should_contact": False,
+            "should_contact": True,
             "skip_reason": "",
             "website_data": "",
             "web_search_results": "",
             "signals": [],
+            "lead_score": 0,
+            "score_breakdown": {},
             "relationship_type": "",
             "draft_email": "",
             "draft_subject": "",
             "reasoning": "",
+            "eval_passed": True,
+            "eval_feedback": "",
+            "auto_redraft_count": 0,
             "human_decision": "",
             "edit_instructions": "",
             "attempt_number": 1,

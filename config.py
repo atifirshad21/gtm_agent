@@ -54,6 +54,17 @@ RESEARCH_SIGNAL_KEYWORDS = [
     # e.g., for DevTools: "developer experience", "open source", "migration"
 ]
 
+# ─── LangSmith tracing (optional) ───
+# Set LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY in your .env to enable.
+# See: https://smith.langchain.com
+LANGSMITH_PROJECT = "gtm-agent"
+
+# ─── Lead scoring ───
+# Leads below this score are automatically skipped.
+# Set to 0 to disable auto-skip (scores still shown for reference).
+# Score is built from fixed signal weights — see gtm_agent.py for rubric.
+LEAD_SCORE_THRESHOLD = 0
+
 # ─── Google Sheet ───
 # Name of your Google Sheet (must be shared with your service account)
 GOOGLE_SHEET_NAME = "Mock_GTM"
