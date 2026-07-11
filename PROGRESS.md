@@ -95,17 +95,22 @@ Listed roughly in order of portfolio impact vs. effort:
   - Add a `--mode followup` CLI flag that loads `following_up` leads instead of `new`
   - Draft should acknowledge the prior touch ("Following up on my note last week...")
 
-- [ ] **Memory viewer command**
-  - Add `memories` as a CLI command (alongside `compact`)
-  - Shows all stored preferences in a Rich table
-  - Add `forget <id>` to delete a specific preference
+- [x] **Memory viewer command** *(done)*
+  - `memories` — Rich table of all stored preferences with ID, observation, example, date
+  - `forget <id>` — deletes a single preference by ID
+  - Both handled in the CLI input loop alongside `compact`
 
 ### Lower priority / stretch
 
 - [ ] **Multi-rep support** — DB schema already supports `rep_name`; just need CLI prompt at startup ("Who's running this? [default]")
 - [ ] **Streamlit dashboard** — web UI alternative to terminal; shows leads table, let you click to process
 - [ ] **Slack delivery** — post draft to a Slack channel instead of terminal; rep reacts with ✅/✏️/❌ to trigger send/edit/cancel
-- [ ] **Parallel research tools** — run scrape_website + web search concurrently instead of sequentially (LangGraph supports this via Send API)
+- [x] **Parallel research tools** *(done)*
+  - Replaced sequential ReAct subagent with `ThreadPoolExecutor(max_workers=3)`
+  - `scrape_website`, `research_search`, `lookup_crm` all fire simultaneously
+  - Results merged and passed to `synthesis_llm` for a structured summary
+  - Removed `create_react_agent` import (no longer needed)
+  - Output format identical to before — downstream nodes unchanged
 
 ---
 

@@ -14,6 +14,7 @@ import os
 import json
 import sqlite3
 from typing import TypedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import gspread
@@ -23,7 +24,6 @@ from google.oauth2.service_account import Credentials
 from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import tool
 from langchain_community.tools.tavily_search import TavilySearchResults
-from langgraph.prebuilt import create_react_agent
 from langgraph.graph import StateGraph, END
 from rich.console import Console
 from rich.panel import Panel
@@ -341,8 +341,55 @@ Valid JSON only."""
     console.print(f"[green]Compacted {len(rows)} preferences → {len(consolidated)}[/green]")
 
 
+def show_memories(rep_name: str = "default"):
+    """Display all stored style preferences in a Rich table."""
+    conn = init_db()
+    rows = conn.execute(
+        "SELECT id, observation, example, created_at FROM style_preferences "
+        "WHERE rep_name = ? ORDER BY created_at DESC",
+        (rep_name,)
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        console.print("[dim]No style preferences stored yet. Edit a draft to start learning.[/dim]")
+        return
+
+    table = Table(title=f"Style Preferences — {len(rows)} stored")
+    table.add_column("ID", style="dim", width=4)
+    table.add_column("Observation", style="cyan")
+    table.add_column("Example", style="green")
+    table.add_column("Date", style="dim", width=10)
+    for row in rows:
+        table.add_row(str(row[0]), row[1], row[2] or "—", str(row[3])[:10])
+    console.print(table)
+    console.print("[dim]Use 'forget <id>' to remove a specific preference.[/dim]")
+
+
+def forget_memory(pref_id: str, rep_name: str = "default"):
+    """Delete a single style preference by ID."""
+    try:
+        pid = int(pref_id)
+    except ValueError:
+        console.print(f"[red]Invalid ID '{pref_id}' — must be a number.[/red]")
+        return
+
+    conn = init_db()
+    result = conn.execute(
+        "DELETE FROM style_preferences WHERE id = ? AND rep_name = ?",
+        (pid, rep_name)
+    )
+    conn.commit()
+    conn.close()
+
+    if result.rowcount:
+        console.print(f"[green]Removed preference #{pid}[/green]")
+    else:
+        console.print(f"[red]No preference found with ID {pid}[/red]")
+
+
 # ═══════════════════════════════════════════
-# RESEARCH SUBAGENT
+# RESEARCH TOOLS + PARALLEL EXECUTION
 # ═══════════════════════════════════════════
 
 research_search = TavilySearchResults(
@@ -364,7 +411,6 @@ def scrape_website(url: str) -> str:
         meta = soup.find("meta", attrs={"name": "description"})
         description = meta["content"] if meta else ""
 
-        # Look for configurable signals on the website
         nav_links = soup.find_all("a")
         signals = []
         for link in nav_links:
@@ -398,30 +444,7 @@ def lookup_crm(company_name: str) -> str:
     return result
 
 
-research_subagent = create_react_agent(
-    model=ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0.2),
-    tools=[research_search, scrape_website, lookup_crm],
-    prompt=f"""You are a research subagent for a GTM outbound system.
-Your ONLY job is to gather intelligence about a company.
-You do NOT write emails. You do NOT make outreach decisions.
-
-CONTEXT: You are researching companies for {COMPANY_NAME}.
-{COMPANY_DESCRIPTION}
-
-RESEARCH CHECKLIST:
-1. Look up the company in the CRM for their website URL and contacts
-2. Scrape their website — look for relevant signals
-3. Search the web for recent news: funding, growth, challenges
-4. If the website scrape fails, do extra web searches to compensate
-
-Always end with this structure:
-COMPANY: [name]
-WEBSITE SUMMARY: [2-3 sentences]
-SIGNALS: [list or "none detected"]
-RECENT NEWS: [key findings]
-CONTACTS IN CRM: [list with statuses]
-"""
-)
+synthesis_llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
 
 
 # ═══════════════════════════════════════════
@@ -479,39 +502,74 @@ def check_should_contact(state: GTMState) -> dict:
 
 
 def research_company(state: GTMState) -> dict:
-    """Research node — uses the subagent to gather intel flexibly."""
+    """Research node — runs scrape, web search, and CRM lookup in parallel, then synthesizes."""
     lead = state["lead"]
     company = lead["Company"]
     company_url = lead.get("Company URL", "")
 
-    console.print(f"\n[bold cyan]🤖 Research subagent activated for {company}...[/bold cyan]")
+    console.print(f"\n[bold cyan]🤖 Researching {company} (3 tools in parallel)...[/bold cyan]")
 
-    research_prompt = f"Research the company '{company}'."
-    if company_url:
-        research_prompt += f" Their website is {company_url} — start by scraping it."
+    # ── Define the three concurrent tasks ──
+    def task_scrape():
+        if company_url:
+            return "scrape", scrape_website.invoke({"url": company_url})
+        return "scrape", f"No URL provided for {company} — skipped."
 
-    result = research_subagent.invoke({
-        "messages": [("human", research_prompt)]
-    })
+    def task_search():
+        raw = research_search.invoke(f"{company} company news funding growth hiring 2024 2025")
+        if isinstance(raw, list):
+            text = "\n".join(
+                f"- {r.get('content', r.get('snippet', ''))[:300]}" for r in raw
+            )
+        else:
+            text = str(raw)
+        return "search", text
 
-    research_summary = ""
-    for msg in reversed(result["messages"]):
-        if msg.type == "ai" and isinstance(msg.content, str) and len(msg.content) > 100:
-            research_summary = msg.content
-            break
+    def task_crm():
+        return "crm", lookup_crm.invoke({"company_name": company})
 
-    tools_used = [msg.name for msg in result["messages"] if msg.type == "tool"]
-    console.print(f"[dim]🔧 Subagent used: {', '.join(tools_used)}[/dim]")
+    # ── Fire all three simultaneously ──
+    tool_results: dict[str, str] = {}
+    tasks = [task_scrape, task_search, task_crm]
+    labels = {"scrape": "website scrape", "search": "web search", "crm": "CRM lookup"}
 
-    # Extract signals from research
-    signals = []
-    summary_lower = research_summary.lower()
-    for kw in RESEARCH_SIGNAL_KEYWORDS:
-        if kw in summary_lower:
-            signals.append(kw)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(fn): fn.__name__ for fn in tasks}
+        for future in as_completed(futures):
+            try:
+                key, value = future.result()
+                tool_results[key] = value
+                console.print(f"   [dim]✓ {labels[key]} complete[/dim]")
+            except Exception as e:
+                key = futures[future].replace("task_", "")
+                tool_results[key] = f"Failed: {e}"
+                console.print(f"   [dim]✗ {labels.get(key, key)} failed: {e}[/dim]")
+
+    # ── Synthesize parallel results into one structured summary ──
+    synthesis = synthesis_llm.invoke(
+        f"""You are a GTM research analyst. Synthesize these parallel research results about {company}.
+
+WEBSITE SCRAPE:
+{tool_results.get('scrape', 'N/A')}
+
+WEB SEARCH RESULTS:
+{tool_results.get('search', 'N/A')}
+
+CRM DATA:
+{tool_results.get('crm', 'N/A')}
+
+Write a concise structured summary — do not pad or repeat raw data:
+COMPANY: {company}
+WEBSITE SUMMARY: [2-3 sentences on what they do and their positioning]
+SIGNALS: [bullet list of meaningful signals, or "none detected"]
+RECENT NEWS: [key findings from web search]
+CONTACTS IN CRM: [names, titles, statuses]"""
+    ).content
+
+    signals = [kw for kw in RESEARCH_SIGNAL_KEYWORDS if kw in synthesis.lower()]
 
     return {
-        "website_data": research_summary,
+        "website_data": synthesis,
         "web_search_results": "",
         "signals": list(set(signals))
     }
@@ -987,10 +1045,18 @@ if __name__ == "__main__":
         table.add_row(str(i + 1), lead["Company"], lead["Contact Name"], lead["Title"])
     console.print(table)
 
-    choice = input("\nLead # to process (or 'all' or 'compact'): ").strip()
+    choice = input("\nLead # to process (or 'all' / 'compact' / 'memories' / 'forget <id>'): ").strip()
 
     if choice.lower() == "compact":
         compact_memories()
+        exit()
+
+    if choice.lower() == "memories":
+        show_memories()
+        exit()
+
+    if choice.lower().startswith("forget "):
+        forget_memory(choice.split(" ", 1)[1].strip())
         exit()
 
     def make_initial_state(lead):
