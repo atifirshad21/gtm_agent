@@ -84,16 +84,21 @@ Listed roughly in order of portfolio impact vs. effort:
 
 ### Medium priority
 
-- [ ] **Richer relationship types**
-  - Current: `cold`, `contacted_other_person`
-  - Add: `inbound` (lead came to you), `customer` (upsell opportunity), `referral`
-  - Requires a new column in the Google Sheet (`Source`) or detection logic
-  - Each type should produce a different draft prompt angle
+- [x] **Richer relationship types** *(done)*
+  - Five types now: `cold`, `inbound`, `referral`, `customer`, `contacted_other_person`, `follow_up`
+  - `classify_relationship` reads optional `Source` column from the sheet (`inbound` / `referral` / `customer`)
+  - Falls back to `cold` if column is absent or empty — fully backwards compatible
+  - Each type has a distinct prompt angle in `draft_email`'s `relationship_guide`
+  - Priority order: `follow_up` > `contacted_other_person` > `customer` > `inbound` > `referral` > `cold`
 
-- [ ] **Follow-up state machine**
-  - Add statuses: `following_up`, `no_response`, `responded`, `converted`
-  - Add a `--mode followup` CLI flag that loads `following_up` leads instead of `new`
-  - Draft should acknowledge the prior touch ("Following up on my note last week...")
+- [x] **Follow-up state machine** *(done)*
+  - Status flow: `new` → `contacted` → (rep sets) `following_up` → `no_response`
+  - `followup` command at the lead prompt loads all `following_up` leads into a separate queue
+  - `make_initial_state(lead, is_followup=True)` flags the run; `classify_relationship` routes to `follow_up` type
+  - `get_last_touch_date()` looks up the last send date from `draft_history` and injects it into the draft prompt
+  - `update_crm` sets `no_response` (not `contacted`) after a follow-up send
+  - Startup banner now shows both new leads count and follow-up queue size
+  - Lead table shows `Source` column
 
 - [x] **Memory viewer command** *(done)*
   - `memories` — Rich table of all stored preferences with ID, observation, example, date

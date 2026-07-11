@@ -299,6 +299,19 @@ def log_draft(company: str, contact_name: str, original: str, final: str, action
     conn.close()
 
 
+def get_last_touch_date(company: str, contact_name: str) -> str:
+    """Return the date of the last sent email to this contact, or 'recently' if unknown."""
+    conn = init_db()
+    row = conn.execute(
+        "SELECT created_at FROM draft_history "
+        "WHERE company = ? AND contact_name = ? AND action = 'send' "
+        "ORDER BY created_at DESC LIMIT 1",
+        (company, contact_name)
+    ).fetchone()
+    conn.close()
+    return str(row[0])[:10] if row else "recently"
+
+
 def compact_memories(rep_name: str = "default"):
     """Consolidate redundant preferences. Run this when memory gets bloated."""
     conn = init_db()
@@ -461,6 +474,8 @@ class GTMState(TypedDict):
     signals: list
     lead_score: int
     score_breakdown: dict
+    is_followup: bool
+    prior_touch_date: str
     relationship_type: str
     draft_email: str
     draft_subject: str
@@ -709,17 +724,37 @@ def route_after_eval(state: GTMState) -> str:
 
 
 def classify_relationship(state: GTMState) -> dict:
-    """Classify: cold or contacted_other_person."""
+    """
+    Classify relationship type. Priority order:
+      follow_up > contacted_other_person > customer > inbound > referral > cold
+
+    Reads optional 'Source' column from the sheet (inbound / referral / customer).
+    Falls back to cold if the column is absent or empty.
+    """
     lead = state["lead"]
     all_contacts = state.get("all_company_contacts", [])
 
-    contacted_others = [c for c in all_contacts
-                       if str(c["Status"]).lower() == "contacted"
-                       and c["Contact Name"] != lead["Contact Name"]]
+    # Follow-up mode always wins
+    if state.get("is_followup", False):
+        touch_date = get_last_touch_date(lead["Company"], lead["Contact Name"])
+        return {"relationship_type": "follow_up", "prior_touch_date": touch_date}
 
+    # Someone else at the company was already contacted
+    contacted_others = [c for c in all_contacts
+                        if str(c["Status"]).lower() in ("contacted", "following_up", "no_response")
+                        and c["Contact Name"] != lead["Contact Name"]]
     if contacted_others:
-        return {"relationship_type": "contacted_other_person"}
-    return {"relationship_type": "cold"}
+        return {"relationship_type": "contacted_other_person", "prior_touch_date": ""}
+
+    # Read optional Source column (case-insensitive, defaults to cold)
+    source = str(lead.get("Source", "") or "").lower().strip()
+    source_map = {
+        "customer":  "customer",
+        "inbound":   "inbound",
+        "referral":  "referral",
+    }
+    rel_type = source_map.get(source, "cold")
+    return {"relationship_type": rel_type, "prior_touch_date": ""}
 
 
 def draft_email(state: GTMState) -> dict:
@@ -742,9 +777,34 @@ def draft_email(state: GTMState) -> dict:
         names = ", ".join([f"{c['Contact Name']} ({c['Title']})" for c in contacted_others])
         other_contacted = f"\n⚠️ Already contacted at this company: {names}. Acknowledge lightly."
 
+    prior_touch = state.get("prior_touch_date", "") or "recently"
     relationship_guide = {
-        "cold": "Cold outreach. Brief, research-backed, curiosity-driven. No hard sell.",
-        "contacted_other_person": "Someone else at this company was contacted. Fresh angle for THIS person's role.",
+        "cold": (
+            "Cold outreach. Brief, research-backed, curiosity-driven. No hard sell."
+        ),
+        "contacted_other_person": (
+            "Someone else at this company was already contacted. "
+            "Use a completely fresh angle tailored to THIS person's specific role — don't reference the prior outreach."
+        ),
+        "inbound": (
+            "This person showed inbound intent. Acknowledge their interest warmly without being pushy. "
+            "Reference what likely brought them in. Keep it conversational, not a pitch."
+        ),
+        "customer": (
+            "Existing customer — this is an expansion or upsell conversation. "
+            "Lead with value already delivered, then open a door to more. No cold-pitch framing."
+        ),
+        "referral": (
+            "You were referred to this person. Lead with the mutual connection — it's your biggest credibility asset. "
+            "Name the referrer early. Keep the rest brief."
+        ),
+        "follow_up": (
+            f"Follow-up to a previous email sent on {prior_touch}. "
+            "Open by briefly acknowledging the prior note ('Following up on my email from [date]...'). "
+            "Introduce a new angle or piece of value — don't just re-send the same pitch. "
+            "Keep it shorter than the first email. End with a soft exit ramp "
+            "('totally understand if the timing isn't right')."
+        ),
     }
 
     edit_note = ""
@@ -928,18 +988,18 @@ def human_review(state: GTMState) -> dict:
 
 
 def update_crm(state: GTMState) -> dict:
-    """Update Google Sheet status to 'contacted'."""
+    """Update Google Sheet status — 'contacted' on first touch, 'no_response' after follow-up."""
     lead = state["lead"]
+    new_status = "no_response" if state.get("is_followup") else "contacted"
     all_leads = sheet.get_all_records()
 
     for i, row in enumerate(all_leads):
         if (row["Company"] == lead["Company"] and
-            row["Contact Name"] == lead["Contact Name"]):
-            # Find the Status column index dynamically
+                row["Contact Name"] == lead["Contact Name"]):
             headers = sheet.row_values(1)
             status_col = headers.index("Status") + 1
-            sheet.update_cell(i + 2, status_col, "contacted")
-            console.print(f"[green]✅ Updated {lead['Contact Name']} → 'contacted'[/green]")
+            sheet.update_cell(i + 2, status_col, new_status)
+            console.print(f"[green]✅ Updated {lead['Contact Name']} → '{new_status}'[/green]")
             break
     return {}
 
@@ -1021,12 +1081,13 @@ app = graph.compile()
 
 if __name__ == "__main__":
     all_leads = sheet.get_all_records()
-    new_leads = [l for l in all_leads if str(l["Status"]).lower() == "new"]
+    new_leads      = [l for l in all_leads if str(l["Status"]).lower() == "new"]
+    followup_leads = [l for l in all_leads if str(l["Status"]).lower() == "following_up"]
 
     console.print(f"\n[bold cyan]═══ {COMPANY_NAME} GTM Agent ═══[/bold cyan]")
     if os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true":
         console.print(f"[dim]📡 LangSmith tracing active → project: {LANGSMITH_PROJECT}[/dim]")
-    console.print(f"[bold]Found {len(new_leads)} new leads[/bold]\n")
+    console.print(f"[bold]New leads: {len(new_leads)}  |  Follow-ups queued: {len(followup_leads)}[/bold]\n")
 
     conn = init_db()
     pref_count = conn.execute(
@@ -1041,11 +1102,23 @@ if __name__ == "__main__":
     table.add_column("Company", style="cyan")
     table.add_column("Contact", style="green")
     table.add_column("Title")
+    table.add_column("Source", style="dim")
     for i, lead in enumerate(new_leads):
-        table.add_row(str(i + 1), lead["Company"], lead["Contact Name"], lead["Title"])
+        table.add_row(
+            str(i + 1),
+            lead["Company"],
+            lead["Contact Name"],
+            lead["Title"],
+            str(lead.get("Source", "") or "outbound"),
+        )
     console.print(table)
 
-    choice = input("\nLead # to process (or 'all' / 'compact' / 'memories' / 'forget <id>'): ").strip()
+    if followup_leads:
+        console.print(f"\n[dim]Follow-up queue: {', '.join(l['Contact Name'] + ' @ ' + l['Company'] for l in followup_leads)}[/dim]")
+
+    choice = input(
+        "\nLead # to process  |  'all'  |  'followup'  |  'compact'  |  'memories'  |  'forget <id>': "
+    ).strip()
 
     if choice.lower() == "compact":
         compact_memories()
@@ -1059,7 +1132,7 @@ if __name__ == "__main__":
         forget_memory(choice.split(" ", 1)[1].strip())
         exit()
 
-    def make_initial_state(lead):
+    def make_initial_state(lead, is_followup: bool = False):
         return {
             "lead": lead,
             "all_company_contacts": [],
@@ -1070,6 +1143,8 @@ if __name__ == "__main__":
             "signals": [],
             "lead_score": 0,
             "score_breakdown": {},
+            "is_followup": is_followup,
+            "prior_touch_date": "",
             "relationship_type": "",
             "draft_email": "",
             "draft_subject": "",
@@ -1083,7 +1158,31 @@ if __name__ == "__main__":
             "original_draft": ""
         }
 
-    if choice.lower() == "all":
+    if choice.lower() == "followup":
+        if not followup_leads:
+            console.print("[dim]No leads with status 'following_up'. Set a lead's Status to 'following_up' in your sheet to queue it.[/dim]")
+            exit()
+        fu_table = Table(title="Follow-up Queue")
+        fu_table.add_column("#", style="dim")
+        fu_table.add_column("Company", style="cyan")
+        fu_table.add_column("Contact", style="green")
+        fu_table.add_column("Title")
+        for i, lead in enumerate(followup_leads):
+            fu_table.add_row(str(i + 1), lead["Company"], lead["Contact Name"], lead["Title"])
+        console.print(fu_table)
+        fu_choice = input("\nFollow-up # to process (or 'all'): ").strip()
+        if fu_choice.lower() == "all":
+            for lead in followup_leads:
+                console.print(f"\n{'═' * 60}")
+                console.print(f"[bold]Follow-up: {lead['Contact Name']} @ {lead['Company']}[/bold]")
+                app.invoke(make_initial_state(lead, is_followup=True))
+        else:
+            idx = int(fu_choice) - 1
+            lead = followup_leads[idx]
+            console.print(f"\n[bold]Follow-up: {lead['Contact Name']} @ {lead['Company']}[/bold]")
+            app.invoke(make_initial_state(lead, is_followup=True))
+
+    elif choice.lower() == "all":
         for lead in new_leads:
             console.print(f"\n{'═' * 60}")
             console.print(f"[bold]Processing: {lead['Contact Name']} @ {lead['Company']}[/bold]")
